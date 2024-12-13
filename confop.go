@@ -44,8 +44,10 @@ func do_diff(l, r any, res map[string]any) {
 		switch irv.Kind() {
 		case reflect.Map:
 			innermap := make(map[string]any)
-			res[k.String()] = innermap
 			do_diff(ilv.Interface(), irv.Interface(), innermap)
+			if len(innermap) != 0 {
+				res[k.String()] = innermap
+			}
 		case reflect.Slice, reflect.Array:
 			if !equalslice(ilv, irv) {
 				res[k.String()] = irv.Interface()
@@ -137,6 +139,9 @@ func do_merge(l, r any) {
 
 // marge r to l
 func merge(l, r map[string]any) map[string]any {
+	if l == nil {
+		l = make(map[string]any)
+	}
 	do_merge(l, r)
 	return l
 }
