@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"reflect"
 	"strings"
 
@@ -14,14 +15,40 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func kind(v reflect.Value) reflect.Kind {
+	r := v.Kind()
+	if r == reflect.Interface {
+		return v.Elem().Kind()
+	}
+	return r
+}
+func intf(v reflect.Value) any {
+	r := v.Kind()
+	if r == reflect.Interface {
+		return v.Elem().Interface()
+	}
+	return v.Interface()
+}
 func equalslice(l, r reflect.Value) bool {
 	if l.Len() != r.Len() {
 		return false
 	}
 	for i := 0; i < l.Len(); i++ {
+
 		if l.Index(i).Kind() == reflect.Slice && r.Index(i).Kind() == reflect.Slice && !equalslice(l.Index(i), r.Index(i)) {
 			return false
 		}
+
+		if kind(r.Index(i)) == reflect.Map || kind(l.Index(i)) == reflect.Map {
+			if kind(r.Index(i)) != kind(l.Index(i)) {
+				return false
+			}
+			tmp := make(map[string]any)
+			slog.Debug("", "rkind", kind(r.Index(i)), "lkind", kind(l.Index(i)))
+			do_diff(intf(l.Index(i)), intf(r.Index(i)), tmp)
+			return len(tmp) == 0
+		}
+
 		if !l.Index(i).Equal(r.Index(i)) {
 			return false
 		}
@@ -34,7 +61,7 @@ func do_diff(l, r any, res map[string]any) {
 	for _, k := range rv.MapKeys() {
 
 		irv := rv.MapIndex(k).Elem()
-		slog.Debug("%s:, value kind: %v\n", k.String(), irv.Kind())
+		slog.Debug("process key", k.String(), irv.Kind())
 		if !lv.MapIndex(k).IsValid() {
 			res[k.String()] = irv.Interface()
 			continue
@@ -49,6 +76,7 @@ func do_diff(l, r any, res map[string]any) {
 				res[k.String()] = innermap
 			}
 		case reflect.Slice, reflect.Array:
+
 			if !equalslice(ilv, irv) {
 				res[k.String()] = irv.Interface()
 			}
@@ -113,9 +141,8 @@ func do_merge(l, r any) {
 
 		irv := rv.MapIndex(k).Elem()
 
-		log := slog.With(k.String(), irv.Kind())
 		if !lv.MapIndex(k).IsValid() {
-			log.Info("letf not valied ")
+
 			lv.SetMapIndex(k, rv.MapIndex(k))
 			continue
 		}
@@ -123,7 +150,7 @@ func do_merge(l, r any) {
 
 		switch irv.Kind() {
 		case reflect.Map:
-			log.Debug("right map ", "left kind", ilv.Kind())
+
 			if ilv.Kind() != reflect.Map {
 				lv.SetMapIndex(k, rv.MapIndex(k))
 			} else {
@@ -131,7 +158,7 @@ func do_merge(l, r any) {
 			}
 
 		default:
-			log.Debug("set  value ")
+
 			lv.SetMapIndex(k, rv.MapIndex(k))
 		}
 	}
@@ -146,40 +173,79 @@ func merge(l, r map[string]any) map[string]any {
 	return l
 }
 
-func main() {
-	//slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})))
+var usage string = `Usage of %s:
 
-	f := flag.String("f", "yaml", "input format:yaml/json/toml")
-	t := flag.String("t", "yaml", "output format:yaml/json/toml")
+diff or merge right conf to left conf
+diff op will find changed and added options
+
+Parameters:
+`
+
+func main() {
+
+	frdefault := "same to left input format(-f)"
+
+	flag.Usage = func() {
+		fmt.Printf(usage, path.Base(os.Args[0]))
+		flag.PrintDefaults()
+	}
+	f := flag.String("f", "yaml", "left input format:yaml/json/toml")
+	fr := flag.String("fr", frdefault, "right input format:yaml/json/toml")
+	t := flag.String("t", frdefault, "output format:yaml/json/toml")
 	indent := flag.Int("i", 2, "output indent")
 	op := flag.String("o", "diff", "operator:diff/merge")
-	l := flag.String("l", "", "left file")
-	r := flag.String("r", "", "right file")
+	l := flag.String("l", "", "left conf file")
+	r := flag.String("r", "", "right conf file")
+	p := flag.String("p", "", "prefix in each line")
+	debug := flag.Bool("d", false, "debug log")
 	flag.Parse()
+	if *fr == frdefault {
+		fr = f
+	}
+	if *t == frdefault {
+		t = f
+	}
+	loglevel := slog.LevelInfo
+	if *debug {
+		loglevel = slog.LevelDebug
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: loglevel})))
+	if *l == "" || *r == "" {
+		fmt.Println("Err: must specify left and right file.")
+		flag.Usage()
+		os.Exit(1)
+
+	}
 	lc, err := os.ReadFile(*l)
 	if err != nil {
 		fmt.Printf("read left file failed %v\n", err)
 		os.Exit(1)
-		return
+
 	}
+
 	rc, err := os.ReadFile(*r)
 	if err != nil {
 		fmt.Printf("read right file failed %v\n", err)
 		os.Exit(1)
-		return
+
 	}
-	var decoder func(in []byte, out interface{}) (err error)
-	switch *f {
-	case "yaml":
-		decoder = yaml.Unmarshal
-	case "json":
-		decoder = json.Unmarshal
-	case "toml":
-		decoder = toml.Unmarshal
-	default:
-		fmt.Printf("unkonw input format\n")
-		os.Exit(1)
+	type Decoder func(in []byte, out interface{}) (err error)
+
+	getdecoder := func(format string) Decoder {
+		switch format {
+		case "yaml":
+			return yaml.Unmarshal
+		case "json":
+			return json.Unmarshal
+		case "toml":
+			return toml.Unmarshal
+		default:
+			fmt.Printf("unkonw format\n")
+			os.Exit(1)
+		}
+		panic("unreachable")
 	}
+
 	var encoder Encoder
 	switch *t {
 	case "yaml":
@@ -204,14 +270,12 @@ func main() {
 	}
 
 	var lm, rm map[string]any
-	err = decoder(lc, &lm)
-	slog.Debug(fmt.Sprintf("%+v]", lm))
+	err = getdecoder(*f)(lc, &lm)
 	if err != nil {
 		fmt.Printf("decode left file failed %v\n", err)
 		os.Exit(1)
 	}
-	err = decoder(rc, &rm)
-	slog.Debug(fmt.Sprintf("%+v]", rm))
+	err = getdecoder(*fr)(rc, &rm)
 	if err != nil {
 		fmt.Printf("decode right file failed %v\n", err)
 		os.Exit(1)
@@ -223,5 +287,13 @@ func main() {
 		fmt.Printf("encode failed %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println(out)
+
+	lines := strings.Split(out, "\n")
+	for c, l := range lines {
+		if len(l) != 0 || len(lines)-1 != c {
+			fmt.Print(*p)
+			fmt.Println(l)
+		}
+	}
+
 }
